@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdint>
 #include <numeric>
 #include <queue>
 
@@ -16,6 +17,10 @@
 #include "mip/HighsConflictPool.h"
 #include "mip/HighsCutPool.h"
 #include "mip/HighsMipSolverData.h"
+
+#if defined(__AVX2__) && !defined(HIGHSINT64)
+#include <immintrin.h>
+#endif
 
 static double activityContributionMin(double coef, const double& lb,
                                       const double& ub) {
@@ -1228,6 +1233,48 @@ void HighsDomain::computeMinActivity(HighsInt start, HighsInt end,
   } else {
     activitymin = 0.0;
     ninfmin = 0;
+#if defined(__AVX2__) && !defined(HIGHSINT64)
+    constexpr HighsInt kSimdWidth = 4;
+    HighsInt simdEnd = start + ((end - start) / kSimdWidth) * kSimdWidth;
+    constexpr HighsInt kMinSimdLen = 16;
+    HighsInt scalarStart = start;
+
+    if (simdEnd - start >= kMinSimdLen) {
+      const __m256d zero = _mm256_setzero_pd();
+      const __m256d inf = _mm256_set1_pd(kHighsInf);
+      const __m256d signMask = _mm256_set1_pd(-0.0);
+      const __m256d vecZero = _mm256_setzero_pd();
+      __m256d sum = _mm256_setzero_pd();
+
+      for (HighsInt j = start; j != simdEnd; j += kSimdWidth) {
+        const __m128i index = _mm_loadu_si128((const __m128i*)&ARindex[j]);
+        const __m256d value = _mm256_loadu_pd(&ARvalue[j]);
+        const __m256d lower =
+            _mm256_i32gather_pd(col_lower_.data(), index, sizeof(double));
+        const __m256d upper =
+            _mm256_i32gather_pd(col_upper_.data(), index, sizeof(double));
+
+        // For min activity: positive coefficient -> lower bound;
+        // negative coefficient -> upper bound.
+        const __m256d useUpper = _mm256_cmp_pd(value, zero, _CMP_LT_OQ);
+        const __m256d bound = _mm256_blendv_pd(lower, upper, useUpper);
+        const __m256d absBound = _mm256_andnot_pd(signMask, bound);
+        const __m256d finite = _mm256_cmp_pd(absBound, inf, _CMP_NEQ_OQ);
+        const __m256d finiteBound = _mm256_blendv_pd(vecZero, bound, finite);
+        sum = _mm256_add_pd(sum, _mm256_mul_pd(value, finiteBound));
+
+        const int infMaskBits =
+            _mm256_movemask_pd(_mm256_cmp_pd(absBound, inf, _CMP_EQ_OQ));
+        ninfmin += static_cast<HighsInt>(__builtin_popcount(infMaskBits));
+      }
+
+      alignas(32) double sumLanes[kSimdWidth];
+      _mm256_store_pd(sumLanes, sum);
+      activitymin += sumLanes[0] + sumLanes[1] + sumLanes[2] + sumLanes[3];
+      scalarStart = simdEnd;
+    }
+    start = scalarStart;
+#endif
     for (HighsInt j = start; j != end; ++j) {
       HighsInt col = ARindex[j];
       double val = ARvalue[j];
@@ -1272,6 +1319,48 @@ void HighsDomain::computeMaxActivity(HighsInt start, HighsInt end,
   } else {
     activitymax = 0.0;
     ninfmax = 0;
+#if defined(__AVX2__) && !defined(HIGHSINT64)
+    constexpr HighsInt kSimdWidth = 4;
+    HighsInt simdEnd = start + ((end - start) / kSimdWidth) * kSimdWidth;
+    constexpr HighsInt kMinSimdLen = 16;
+    HighsInt scalarStart = start;
+
+    if (simdEnd - start >= kMinSimdLen) {
+      const __m256d zero = _mm256_setzero_pd();
+      const __m256d inf = _mm256_set1_pd(kHighsInf);
+      const __m256d signMask = _mm256_set1_pd(-0.0);
+      const __m256d vecZero = _mm256_setzero_pd();
+      __m256d sum = _mm256_setzero_pd();
+
+      for (HighsInt j = start; j != simdEnd; j += kSimdWidth) {
+        const __m128i index = _mm_loadu_si128((const __m128i*)&ARindex[j]);
+        const __m256d value = _mm256_loadu_pd(&ARvalue[j]);
+        const __m256d lower =
+            _mm256_i32gather_pd(col_lower_.data(), index, sizeof(double));
+        const __m256d upper =
+            _mm256_i32gather_pd(col_upper_.data(), index, sizeof(double));
+
+        // For max activity: positive coefficient -> upper bound;
+        // negative coefficient -> lower bound.
+        const __m256d useLower = _mm256_cmp_pd(value, zero, _CMP_LT_OQ);
+        const __m256d bound = _mm256_blendv_pd(upper, lower, useLower);
+        const __m256d absBound = _mm256_andnot_pd(signMask, bound);
+        const __m256d finite = _mm256_cmp_pd(absBound, inf, _CMP_NEQ_OQ);
+        const __m256d finiteBound = _mm256_blendv_pd(vecZero, bound, finite);
+        sum = _mm256_add_pd(sum, _mm256_mul_pd(value, finiteBound));
+
+        const int infMaskBits =
+            _mm256_movemask_pd(_mm256_cmp_pd(absBound, inf, _CMP_EQ_OQ));
+        ninfmax += static_cast<HighsInt>(__builtin_popcount(infMaskBits));
+      }
+
+      alignas(32) double sumLanes[kSimdWidth];
+      _mm256_store_pd(sumLanes, sum);
+      activitymax += sumLanes[0] + sumLanes[1] + sumLanes[2] + sumLanes[3];
+      scalarStart = simdEnd;
+    }
+    start = scalarStart;
+#endif
     for (HighsInt j = start; j != end; ++j) {
       HighsInt col = ARindex[j];
       double val = ARvalue[j];

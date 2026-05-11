@@ -572,7 +572,6 @@ class HighsDomain {
       reducedstack.push_back(domchgstack_[i]);
     }
 
-    reducedstack.shrink_to_fit();
     return reducedstack;
   }
 

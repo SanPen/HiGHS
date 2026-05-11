@@ -7,8 +7,6 @@
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 #include "mip/HighsSearch.h"
 
-#include <numeric>
-
 #include "lp_data/HConst.h"
 #include "mip/HighsCutGeneration.h"
 #include "mip/HighsDomainChange.h"
@@ -245,32 +243,45 @@ HighsInt HighsSearch::selectBranchingCandidate(int64_t maxSbIters,
                                                double& upNodeLb) {
   assert(!lp->getFractionalIntegers().empty());
 
-  std::vector<double> upscore;
-  std::vector<double> downscore;
-  std::vector<uint8_t> upscorereliable;
-  std::vector<uint8_t> downscorereliable;
-  std::vector<double> upbound;
-  std::vector<double> downbound;
-
   HighsInt numfrac = lp->getFractionalIntegers().size();
   const auto& fracints = lp->getFractionalIntegers();
 
-  upscore.resize(numfrac, kHighsInf);
-  downscore.resize(numfrac, kHighsInf);
-  upbound.resize(numfrac, getCurrentLowerBound());
-  downbound.resize(numfrac, getCurrentLowerBound());
+  auto& upscore = branchingUpScoreScratch;
+  auto& downscore = branchingDownScoreScratch;
+  auto& upbound = branchingUpBoundScratch;
+  auto& downbound = branchingDownBoundScratch;
+  auto& fracvalScratch = branchingFracValScratch;
+  auto& upvalScratch = branchingUpValScratch;
+  auto& downvalScratch = branchingDownValScratch;
+  auto& colScratch = branchingColScratch;
+  auto& upscorereliable = branchingUpReliableScratch;
+  auto& downscorereliable = branchingDownReliableScratch;
 
-  upscorereliable.resize(numfrac, 0);
-  downscorereliable.resize(numfrac, 0);
+  const double currentLowerBound = getCurrentLowerBound();
+  const double feastol = mipsolver.mipdata_->feastol;
+  upscore.assign(numfrac, kHighsInf);
+  downscore.assign(numfrac, kHighsInf);
+  upbound.assign(numfrac, currentLowerBound);
+  downbound.assign(numfrac, currentLowerBound);
+  fracvalScratch.resize(numfrac);
+  upvalScratch.resize(numfrac);
+  downvalScratch.resize(numfrac);
+  colScratch.resize(numfrac);
+  upscorereliable.assign(numfrac, 0);
+  downscorereliable.assign(numfrac, 0);
 
   // initialize up and down scores of variables that have a
   // reliable pseudocost so that they do not get evaluated
   for (HighsInt k = 0; k != numfrac; ++k) {
     HighsInt col = fracints[k].first;
     double fracval = fracints[k].second;
+    colScratch[k] = col;
+    fracvalScratch[k] = fracval;
+    upvalScratch[k] = std::ceil(fracval);
+    downvalScratch[k] = std::floor(fracval);
 
     const double lower_residual =
-        (fracval - localdom.col_lower_[col]) - mipsolver.mipdata_->feastol;
+        (fracval - localdom.col_lower_[col]) - feastol;
     const bool lower_ok = lower_residual > 0;
     if (!lower_ok)
       highsLogUser(mipsolver.options_mip_->log_options, HighsLogType::kError,
@@ -279,12 +290,11 @@ HighsInt HighsSearch::selectBranchingCandidate(int64_t maxSbIters,
                    "localdom.col_lower_[col] + mipsolver.mipdata_->feastol: "
                    "Residual %g\n",
                    fracval,
-                   localdom.col_lower_[col] + mipsolver.mipdata_->feastol,
-                   localdom.col_lower_[col], mipsolver.mipdata_->feastol,
-                   lower_residual);
+                   localdom.col_lower_[col] + feastol, localdom.col_lower_[col],
+                   feastol, lower_residual);
 
     const double upper_residual =
-        (localdom.col_upper_[col] - fracval) - mipsolver.mipdata_->feastol;
+        (localdom.col_upper_[col] - fracval) - feastol;
     const bool upper_ok = upper_residual > 0;
     if (!upper_ok)
       highsLogUser(mipsolver.options_mip_->log_options, HighsLogType::kError,
@@ -293,9 +303,8 @@ HighsInt HighsSearch::selectBranchingCandidate(int64_t maxSbIters,
                    "localdom.col_upper_[col] - mipsolver.mipdata_->feastol: "
                    "Residual %g\n",
                    fracval,
-                   localdom.col_upper_[col] - mipsolver.mipdata_->feastol,
-                   localdom.col_upper_[col], mipsolver.mipdata_->feastol,
-                   upper_residual);
+                   localdom.col_upper_[col] - feastol, localdom.col_upper_[col],
+                   feastol, upper_residual);
 
     assert(lower_residual > -1e-12 && upper_residual > -1e-12);
 
@@ -322,19 +331,15 @@ HighsInt HighsSearch::selectBranchingCandidate(int64_t maxSbIters,
     }
   }
 
-  std::vector<HighsInt> evalqueue;
-  evalqueue.resize(numfrac);
-  std::iota(evalqueue.begin(), evalqueue.end(), 0);
-
   auto numNodesUp = [&](HighsInt k) {
-    return mipsolver.mipdata_->nodequeue.numNodesUp(fracints[k].first);
+    return mipsolver.mipdata_->nodequeue.numNodesUp(colScratch[k]);
   };
 
   auto numNodesDown = [&](HighsInt k) {
-    return mipsolver.mipdata_->nodequeue.numNodesDown(fracints[k].first);
+    return mipsolver.mipdata_->nodequeue.numNodesDown(colScratch[k]);
   };
 
-  double minScore = mipsolver.mipdata_->feastol;
+  double minScore = feastol;
 
   auto selectBestScore = [&](bool finalSelection) {
     HighsInt best = -1;
@@ -343,7 +348,8 @@ HighsInt HighsSearch::selectBranchingCandidate(int64_t maxSbIters,
     int64_t bestnumnodes = 0;
 
     double oldminscore = minScore;
-    for (HighsInt k : evalqueue) {
+    const auto scoreContext = pseudocost.makeScoreContext();
+    for (HighsInt k = 0; k != numfrac; ++k) {
       double score;
 
       if (upscore[k] <= oldminscore) upscorereliable[k] = true;
@@ -354,16 +360,18 @@ HighsInt HighsSearch::selectBranchingCandidate(int64_t maxSbIters,
       minScore = std::max(s, minScore);
 
       if (upscore[k] <= oldminscore || downscore[k] <= oldminscore)
-        score = pseudocost.getScore(fracints[k].first,
+        score = pseudocost.getScore(colScratch[k],
                                     std::min(upscore[k], oldminscore),
-                                    std::min(downscore[k], oldminscore));
+                                    std::min(downscore[k], oldminscore),
+                                    scoreContext);
       else {
         score = upscore[k] == kHighsInf || downscore[k] == kHighsInf
-                    ? finalSelection ? pseudocost.getScore(fracints[k].first,
-                                                           fracints[k].second)
+                    ? finalSelection ? pseudocost.getScore(colScratch[k],
+                                                           fracvalScratch[k],
+                                                           scoreContext)
                                      : kHighsInf
-                    : pseudocost.getScore(fracints[k].first, upscore[k],
-                                          downscore[k]);
+                    : pseudocost.getScore(colScratch[k], upscore[k],
+                                          downscore[k], scoreContext);
       }
 
       assert(score >= 0.0);
@@ -375,7 +383,7 @@ HighsInt HighsSearch::selectBranchingCandidate(int64_t maxSbIters,
         nodes =
             (downnodes / (double)(numnodes)) * (upnodes / (double)(numnodes));
       if (score > bestscore ||
-          (score > bestscore - mipsolver.mipdata_->feastol &&
+          (score > bestscore - feastol &&
            std::make_pair(nodes, numnodes) >
                std::make_pair(bestnodes, bestnumnodes))) {
         bestscore = score;
@@ -405,10 +413,10 @@ HighsInt HighsSearch::selectBranchingCandidate(int64_t maxSbIters,
 
     lp->setObjectiveLimit(mipsolver.mipdata_->upper_limit);
 
-    HighsInt col = fracints[candidate].first;
-    double fracval = fracints[candidate].second;
-    double upval = std::ceil(fracval);
-    double downval = std::floor(fracval);
+    HighsInt col = colScratch[candidate];
+    double fracval = fracvalScratch[candidate];
+    double upval = upvalScratch[candidate];
+    double downval = downvalScratch[candidate];
 
     auto analyzeSolution = [&](double objdelta,
                                const std::vector<double>& sol) {
@@ -417,16 +425,14 @@ HighsInt HighsSearch::selectBranchingCandidate(int64_t maxSbIters,
       const auto& domchgstack = localdom.getDomainChangeStack();
 
       for (HighsInt k = 0; k != numfrac; ++k) {
-        if (fracints[k].first == col) continue;
-        double otherfracval = fracints[k].second;
-        double otherdownval = std::floor(fracints[k].second);
-        double otherupval = std::ceil(fracints[k].second);
-        if (sol[fracints[k].first] <=
-            otherdownval + mipsolver.mipdata_->feastol) {
-          if (localdom.col_upper_[fracints[k].first] >
-              otherdownval + mipsolver.mipdata_->feastol) {
-            localdom.changeBound(HighsBoundType::kUpper, fracints[k].first,
-                                 otherdownval);
+        const HighsInt othercol = colScratch[k];
+        if (othercol == col) continue;
+        double otherfracval = fracvalScratch[k];
+        double otherdownval = downvalScratch[k];
+        double otherupval = upvalScratch[k];
+        if (sol[othercol] <= otherdownval + feastol) {
+          if (localdom.col_upper_[othercol] > otherdownval + feastol) {
+            localdom.changeBound(HighsBoundType::kUpper, othercol, otherdownval);
             if (localdom.infeasible()) {
               localdom.conflictAnalysis(mipsolver.mipdata_->conflictPool);
               localdom.backtrack();
@@ -447,13 +453,13 @@ HighsInt HighsSearch::selectBranchingCandidate(int64_t maxSbIters,
             for (HighsInt j = domchgStackSize + 1; j < newStackSize; ++j) {
               if (domchgstack[j].boundtype == HighsBoundType::kLower) {
                 if (domchgstack[j].boundval >
-                    sol[domchgstack[j].column] + mipsolver.mipdata_->feastol) {
+                    sol[domchgstack[j].column] + feastol) {
                   solutionValid = false;
                   break;
                 }
               } else {
                 if (domchgstack[j].boundval <
-                    sol[domchgstack[j].column] - mipsolver.mipdata_->feastol) {
+                    sol[domchgstack[j].column] - feastol) {
                   solutionValid = false;
                   break;
                 }
@@ -466,18 +472,15 @@ HighsInt HighsSearch::selectBranchingCandidate(int64_t maxSbIters,
           }
 
           if (objdelta <= mipsolver.mipdata_->feastol) {
-            pseudocost.addObservation(fracints[k].first,
-                                      otherdownval - otherfracval, objdelta);
-            markBranchingVarDownReliableAtNode(fracints[k].first);
+            pseudocost.addObservation(othercol, otherdownval - otherfracval,
+                                      objdelta);
+            markBranchingVarDownReliableAtNode(othercol);
           }
 
           downscore[k] = std::min(downscore[k], objdelta);
-        } else if (sol[fracints[k].first] >=
-                   otherupval - mipsolver.mipdata_->feastol) {
-          if (localdom.col_lower_[fracints[k].first] <
-              otherupval - mipsolver.mipdata_->feastol) {
-            localdom.changeBound(HighsBoundType::kLower, fracints[k].first,
-                                 otherupval);
+        } else if (sol[othercol] >= otherupval - feastol) {
+          if (localdom.col_lower_[othercol] < otherupval - feastol) {
+            localdom.changeBound(HighsBoundType::kLower, othercol, otherupval);
 
             if (localdom.infeasible()) {
               localdom.conflictAnalysis(mipsolver.mipdata_->conflictPool);
@@ -499,13 +502,13 @@ HighsInt HighsSearch::selectBranchingCandidate(int64_t maxSbIters,
             for (HighsInt j = domchgStackSize + 1; j < newStackSize; ++j) {
               if (domchgstack[j].boundtype == HighsBoundType::kLower) {
                 if (domchgstack[j].boundval >
-                    sol[domchgstack[j].column] + mipsolver.mipdata_->feastol) {
+                    sol[domchgstack[j].column] + feastol) {
                   solutionValid = false;
                   break;
                 }
               } else {
                 if (domchgstack[j].boundval <
-                    sol[domchgstack[j].column] - mipsolver.mipdata_->feastol) {
+                    sol[domchgstack[j].column] - feastol) {
                   solutionValid = false;
                   break;
                 }
@@ -519,9 +522,9 @@ HighsInt HighsSearch::selectBranchingCandidate(int64_t maxSbIters,
           }
 
           if (objdelta <= mipsolver.mipdata_->feastol) {
-            pseudocost.addObservation(fracints[k].first,
-                                      otherupval - otherfracval, objdelta);
-            markBranchingVarUpReliableAtNode(fracints[k].first);
+            pseudocost.addObservation(othercol, otherupval - otherfracval,
+                                      objdelta);
+            markBranchingVarUpReliableAtNode(othercol);
           }
 
           upscore[k] = std::min(upscore[k], objdelta);

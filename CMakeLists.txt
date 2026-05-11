@@ -497,6 +497,11 @@ if(NOT(${HIGHS_NO_DEFAULT_THREADS} STREQUAL "OFF"))
 	message(STATUS "Default multithreading: disabled")
 endif()
 
+option(HIGHS_MIP_NATIVE_SIMD
+       "Compile MIP sources with native CPU tuning flags for SIMD-capable benchmark builds"
+       OFF)
+message(STATUS "HIGHS_MIP_NATIVE_SIMD: ${HIGHS_MIP_NATIVE_SIMD}")
+
 # For debug of cuda locally
 
 # does not work with older CMake

@@ -7,6 +7,7 @@
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 #include "mip/HighsPrimalHeuristics.h"
 
+#include <cstdint>
 #include <numeric>
 #include <unordered_set>
 
@@ -131,7 +132,25 @@ bool HighsPrimalHeuristics::solveSubMip(
   else
     submipoptions.presolve = kHighsOnString;
   submipoptions.mip_detect_symmetry = false;
-  submipoptions.mip_heuristic_effort = 0.8;
+  const HighsInt numIntegral = mipsolver.mipdata_->integral_cols.size();
+  const HighsInt numContinuous = mipsolver.mipdata_->continuous_cols.size();
+  const bool throttleNestedHeuristics =
+      !mipsolver.submip &&
+      (mipsolver.numRow() >= 1000 ||
+       (numIntegral >= 40 &&
+        numContinuous >= 4 * std::max(HighsInt{1}, numIntegral)));
+  if (throttleNestedHeuristics) {
+    // Keep sub-MIPs focused on the restricted search itself for large/LP-heavy
+    // parent models. Recursive root heuristics inside these heuristic
+    // subproblems duplicate expensive work already done by the parent MIP.
+    submipoptions.mip_heuristic_effort = 0.05;
+    submipoptions.mip_heuristic_run_rens = false;
+    submipoptions.mip_heuristic_run_root_reduced_cost = false;
+    submipoptions.mip_heuristic_run_zi_round = false;
+    submipoptions.mip_heuristic_run_shifting = false;
+  } else {
+    submipoptions.mip_heuristic_effort = 0.8;
+  }
   // setup solver and run it
 
   HighsSolution solution;
@@ -1105,30 +1124,36 @@ void HighsPrimalHeuristics::shifting(const std::vector<double>& relaxationsol) {
   HighsLpRelaxation lprelax(mipsolver.mipdata_->lp);
   std::vector<std::pair<HighsInt, double>> current_fractional_integers =
       lprelax.getFractionalIntegers();
-  std::vector<std::tuple<HighsInt, HighsInt, double>> current_infeasible_rows =
-      mipsolver.mipdata_->getInfeasibleRows(current_relax_solution);
+  std::vector<uint8_t> fractional_integer_flag(mipsolver.numCol(), 0);
+  std::vector<HighsInt> fractional_integer_pos(mipsolver.numCol(), -1);
+  for (HighsInt i = 0;
+       i != static_cast<HighsInt>(current_fractional_integers.size()); ++i) {
+    fractional_integer_flag[current_fractional_integers[i].first] = 1;
+    fractional_integer_pos[current_fractional_integers[i].first] = i;
+  }
+  std::vector<std::tuple<HighsInt, HighsInt, double>> current_infeasible_rows;
+  mipsolver.mipdata_->getInfeasibleRows(current_relax_solution,
+                                        current_infeasible_rows);
   size_t previous_infeasible_rows_size = current_infeasible_rows.size();
   bool hasInfeasibleConstraints = current_infeasible_rows.size() != 0;
   HighsInt iterationsWithoutReductions = 0;
   HighsInt maxIterationsWithoutReductions = 5;
   std::unordered_map<HighsInt, std::vector<HighsInt>> shift_iterations_set;
-  std::vector<HighsInt> shifts;
 
-  auto findPairByIndex = [](std::vector<std::pair<HighsInt, double>>& vec,
-                            HighsInt k) {
-    return std::find_if(
-        vec.begin(), vec.end(),
-        [k](const std::pair<HighsInt, double>& p) { return p.first == k; });
-  };
+  auto removeFractionalInteger = [&](HighsInt col) {
+    HighsInt pos = fractional_integer_pos[col];
+    if (pos == -1) return false;
 
-  auto findShiftsByIndex =
-      [](const std::unordered_map<HighsInt, std::vector<HighsInt>>& shifts,
-         HighsInt k) -> std::vector<HighsInt> {
-    auto it = shifts.find(k);
-    if (it != shifts.end()) {
-      return it->second;
+    HighsInt lastpos =
+        static_cast<HighsInt>(current_fractional_integers.size()) - 1;
+    if (pos != lastpos) {
+      current_fractional_integers[pos] = current_fractional_integers[lastpos];
+      fractional_integer_pos[current_fractional_integers[pos].first] = pos;
     }
-    return {};
+    current_fractional_integers.pop_back();
+    fractional_integer_pos[col] = -1;
+    fractional_integer_flag[col] = 0;
+    return true;
   };
 
   while ((current_fractional_integers.size() > 0 || hasInfeasibleConstraints) &&
@@ -1148,9 +1173,8 @@ void HighsPrimalHeuristics::shifting(const std::vector<double>& relaxationsol) {
         HighsInt start = mipsolver.mipdata_->ARstart_[r];
         HighsInt end = mipsolver.mipdata_->ARstart_[r + 1];
         for (HighsInt jInd = start; jInd != end; ++jInd) {
-          auto it = findPairByIndex(current_fractional_integers,
-                                    mipsolver.mipdata_->ARindex_[jInd]);
-          fractionalIntegerFound = it != current_fractional_integers.end();
+          fractionalIntegerFound =
+              fractional_integer_flag[mipsolver.mipdata_->ARindex_[jInd]];
           if (fractionalIntegerFound) break;
         }
         rIndex++;
@@ -1178,8 +1202,7 @@ void HighsPrimalHeuristics::shifting(const std::vector<double>& relaxationsol) {
         if (currentLp.col_lower_[j] == currentLp.col_upper_[j]) continue;
 
         // lambda for finding best shift
-        auto repair = [&findPairByIndex, &current_fractional_integers,
-                       &findShiftsByIndex, &shift_iterations_set, &t,
+        auto repair = [&fractional_integer_flag, &shift_iterations_set, &t,
                        &score_min, &j_min, &aij_min, &x_j_min,
                        &current_relax_solution, &moveValueUp](
                           HighsInt col, HighsInt direction, HighsInt row_sense,
@@ -1192,22 +1215,19 @@ void HighsPrimalHeuristics::shifting(const std::vector<double>& relaxationsol) {
           // skip variables at bounds
           if (isAtBound) return;
 
-          // search for column
-          auto it = findPairByIndex(current_fractional_integers, col);
-
           // add data
-          bool found = it != current_fractional_integers.end();
+          bool found = fractional_integer_flag[col];
 
           double score = kHighsInf;
           if (found) {
             score = -1.0 + 1.0 / static_cast<double>(numLocks + 1);
           } else {
-            const auto& shifts = findShiftsByIndex(shift_iterations_set, col);
-            if (shifts.empty())
+            auto shifts = shift_iterations_set.find(col);
+            if (shifts == shift_iterations_set.end())
               score = direction * (isMaximization ? -cost : cost);
             else {
               score = 0.0;
-              for (double shift : shifts) {
+              for (double shift : shifts->second) {
                 if (direction * shift > 0)
                   score += pow(1.1, direction * shift - t);
               }
@@ -1243,11 +1263,7 @@ void HighsPrimalHeuristics::shifting(const std::vector<double>& relaxationsol) {
 
       if (j_min != std::numeric_limits<HighsInt>::max()) {
         // Update current_fractional_integers
-        auto it = findPairByIndex(current_fractional_integers, j_min);
-        if (it != current_fractional_integers.end()) {
-          current_fractional_integers.erase(it);
-          fractionalIntegersReduced = true;
-        }
+        fractionalIntegersReduced = removeFractionalInteger(j_min);
         // Update current_relax_solution and shift_iterations_set (for not
         // fractional integers)
         if (moveValueUp) {
@@ -1302,7 +1318,7 @@ void HighsPrimalHeuristics::shifting(const std::vector<double>& relaxationsol) {
 
         auto isBetter = [&currentLp, &it, &xi_max, &delta_c_min, &pind_j_min,
                          &j_min, &x_j_min, &sigma,
-                         &i](double col, double xi, double roundedval,
+                         &i](HighsInt col, double xi, double roundedval,
                              HighsInt direction) {
           double c_min = currentLp.col_cost_[col] * (roundedval - it.second);
           if (xi > xi_max || (xi == xi_max && c_min < delta_c_min)) {
@@ -1326,13 +1342,13 @@ void HighsPrimalHeuristics::shifting(const std::vector<double>& relaxationsol) {
         current_relax_solution[j_min] = x_j_min;
       }
       if (pind_j_min != std::numeric_limits<HighsInt>::max()) {
-        current_fractional_integers.erase(current_fractional_integers.begin() +
-                                          pind_j_min);
+        HighsInt removed_col = current_fractional_integers[pind_j_min].first;
+        removeFractionalInteger(removed_col);
         fractionalIntegersReduced = true;
       }
     }
-    current_infeasible_rows =
-        mipsolver.mipdata_->getInfeasibleRows(current_relax_solution);
+    mipsolver.mipdata_->getInfeasibleRows(current_relax_solution,
+                                          current_infeasible_rows);
     hasInfeasibleConstraints = current_infeasible_rows.size() != 0;
     if (current_infeasible_rows.size() < previous_infeasible_rows_size ||
         fractionalIntegersReduced)
@@ -1379,6 +1395,9 @@ void HighsPrimalHeuristics::ziRound(const std::vector<double>& relaxationsol) {
   rowActivities.resize(currentLp.num_row_);
   XrowLower.resize(currentLp.num_row_);
   XrowUpper.resize(currentLp.num_row_);
+  if (currentLp.num_row_ > 0)
+    getLpRowBounds(currentLp, 0, currentLp.num_row_ - 1, XrowLower.data(),
+                   XrowUpper.data());
 
   HighsInt loop_count = 0;
   HighsInt max_loop_count = 5;
@@ -1391,17 +1410,13 @@ void HighsPrimalHeuristics::ziRound(const std::vector<double>& relaxationsol) {
     previous_zi_total = zi_total;
     loop_count++;
 
-    if (currentLp.num_row_ > 0)
-      getLpRowBounds(currentLp, 0, currentLp.num_row_ - 1, XrowLower.data(),
-                     XrowUpper.data());
+    rowActivities.assign(currentLp.num_row_, 0.0);
+    calculateRowValuesQuad(currentLp, current_relax_solution, rowActivities);
 
     for (HighsInt j : intcols) {
       double relax_solution = current_relax_solution[j];
       if (fractionality(relax_solution) <= mipsolver.mipdata_->feastol)
         continue;
-
-      rowActivities.assign(currentLp.num_row_, 0.0);
-      calculateRowValuesQuad(currentLp, current_relax_solution, rowActivities);
 
       double min_row_ratio_for_upper = kHighsInf;
       double min_row_ratio_for_lower = kHighsInf;
@@ -1429,6 +1444,10 @@ void HighsPrimalHeuristics::ziRound(const std::vector<double>& relaxationsol) {
       auto performUpdates = [&](HighsInt col, double change) {
         double old_relax_solution = current_relax_solution[col];
         current_relax_solution[col] += change;
+        for (HighsInt el = currentLp.a_matrix_.start_[col];
+             el < currentLp.a_matrix_.start_[col + 1]; ++el)
+          rowActivities[currentLp.a_matrix_.index_[el]] +=
+              currentLp.a_matrix_.value_[el] * change;
         zi_total =
             zi_total - zi(old_relax_solution) + zi(current_relax_solution[col]);
       };

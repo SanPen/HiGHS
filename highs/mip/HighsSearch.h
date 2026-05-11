@@ -40,6 +40,16 @@ class HighsSearch {
   HighsCDouble treeweight;
   std::vector<HighsInt> inds;
   std::vector<double> vals;
+  std::vector<double> branchingUpScoreScratch;
+  std::vector<double> branchingDownScoreScratch;
+  std::vector<double> branchingUpBoundScratch;
+  std::vector<double> branchingDownBoundScratch;
+  std::vector<double> branchingFracValScratch;
+  std::vector<double> branchingUpValScratch;
+  std::vector<double> branchingDownValScratch;
+  std::vector<HighsInt> branchingColScratch;
+  std::vector<uint8_t> branchingUpReliableScratch;
+  std::vector<uint8_t> branchingDownReliableScratch;
   HighsInt depthoffset;
   bool inbranching;
   bool inheuristic;

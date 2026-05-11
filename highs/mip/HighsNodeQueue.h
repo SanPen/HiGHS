@@ -15,6 +15,7 @@
 #include <memory>
 #include <queue>
 #include <set>
+#include <utility>
 #include <vector>
 
 #include "lp_data/HConst.h"
@@ -162,8 +163,8 @@ class HighsNodeQueue {
     OpenNode(std::vector<HighsDomainChange>&& domchgstack,
              std::vector<HighsInt>&& branchings, double lower_bound,
              double estimate, HighsInt depth)
-        : domchgstack(domchgstack),
-          branchings(branchings),
+        : domchgstack(std::move(domchgstack)),
+          branchings(std::move(branchings)),
           lower_bound(lower_bound),
           estimate(estimate),
           depth(depth),
@@ -208,6 +209,7 @@ class HighsNodeQueue {
   int64_t numSuboptimal = 0;
   double optimality_limit = kHighsInf;
   HighsInt numCol = 0;
+  std::vector<int64_t> delnodesScratch;
 
   void link_estim(int64_t node);
 

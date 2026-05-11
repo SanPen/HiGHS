@@ -247,14 +247,39 @@ class HighsPseudocost {
     return conflictscoredown[col] / conflict_weight;
   }
 
-  double getScore(HighsInt col, double upcost, double downcost) const {
+  struct ScoreContext {
+    double costScale;
+    double inferenceScale;
+    double cutoffScale;
+    double conflictScale;
+    double inverseConflictWeight;
+    double inverseDegeneracyFactor;
+    double degeneracyFactor;
+  };
+
+  ScoreContext makeScoreContext() const {
+    double avgCutoffs = static_cast<double>(ncutoffstotal) /
+                        std::max(1.0, static_cast<double>(ncutoffstotal) +
+                                          static_cast<double>(nsamplestotal));
+    double conflictScoreAvg =
+        conflict_avg_score /
+        (conflict_weight * static_cast<double>(conflictscoreup.size()));
+
+    return {1.0 / std::max(minThreshold, cost_total * cost_total),
+            1.0 / std::max(minThreshold, inferences_total * inferences_total),
+            1.0 / std::max(minThreshold, avgCutoffs * avgCutoffs),
+            1.0 / std::max(minThreshold,
+                           conflictScoreAvg * conflictScoreAvg),
+            1.0 / conflict_weight, 1.0 / degeneracyFactor, degeneracyFactor};
+  }
+
+  double getScore(HighsInt col, double upcost, double downcost,
+                  const ScoreContext& context) const {
     double costScore = std::max(upcost, minThreshold) *
-                       std::max(downcost, minThreshold) /
-                       std::max(minThreshold, cost_total * cost_total);
+                       std::max(downcost, minThreshold) * context.costScale;
     double inferenceScore =
         std::max(inferencesup[col], minThreshold) *
-        std::max(inferencesdown[col], minThreshold) /
-        std::max(minThreshold, inferences_total * inferences_total);
+        std::max(inferencesdown[col], minThreshold) * context.inferenceScale;
 
     double cutOffScoreUp =
         ncutoffsup[col] /
@@ -264,29 +289,36 @@ class HighsPseudocost {
         ncutoffsdown[col] /
         std::max(1.0, static_cast<double>(ncutoffsdown[col]) +
                           static_cast<double>(nsamplesdown[col]));
-    double avgCutoffs = static_cast<double>(ncutoffstotal) /
-                        std::max(1.0, static_cast<double>(ncutoffstotal) +
-                                          static_cast<double>(nsamplestotal));
 
     double cutoffScore = std::max(cutOffScoreUp, minThreshold) *
-                         std::max(cutOffScoreDown, minThreshold) /
-                         std::max(minThreshold, avgCutoffs * avgCutoffs);
+                         std::max(cutOffScoreDown, minThreshold) *
+                         context.cutoffScale;
 
-    double conflictScoreUp = conflictscoreup[col] / conflict_weight;
-    double conflictScoreDown = conflictscoredown[col] / conflict_weight;
-    double conflictScoreAvg =
-        conflict_avg_score /
-        (conflict_weight * static_cast<double>(conflictscoreup.size()));
+    double conflictScoreUp =
+        conflictscoreup[col] * context.inverseConflictWeight;
+    double conflictScoreDown =
+        conflictscoredown[col] * context.inverseConflictWeight;
     double conflictScore =
         std::max(conflictScoreUp, minThreshold) *
-        std::max(conflictScoreDown, minThreshold) /
-        std::max(minThreshold, conflictScoreAvg * conflictScoreAvg);
+        std::max(conflictScoreDown, minThreshold) * context.conflictScale;
 
     auto mapScore = [](double score) { return 1.0 - 1.0 / (1.0 + score); };
-    return mapScore(costScore) / degeneracyFactor +
-           degeneracyFactor *
+    return mapScore(costScore) * context.inverseDegeneracyFactor +
+           context.degeneracyFactor *
                (1e-2 * mapScore(conflictScore) +
                 1e-4 * (mapScore(cutoffScore) + mapScore(inferenceScore)));
+  }
+
+  double getScore(HighsInt col, double upcost, double downcost) const {
+    return getScore(col, upcost, downcost, makeScoreContext());
+  }
+
+  double getScore(HighsInt col, double frac,
+                  const ScoreContext& context) const {
+    double upcost = getPseudocostUp(col, frac);
+    double downcost = getPseudocostDown(col, frac);
+
+    return getScore(col, upcost, downcost, context);
   }
 
   double getScore(HighsInt col, double frac) const {

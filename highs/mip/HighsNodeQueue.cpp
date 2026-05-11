@@ -185,7 +185,6 @@ void HighsNodeQueue::unlink_domchgs(int64_t node) {
   }
 
   nodes[node].domchglinks.clear();
-  nodes[node].domchglinks.shrink_to_fit();
 }
 
 double HighsNodeQueue::link(int64_t node) {
@@ -235,20 +234,27 @@ void HighsNodeQueue::setNumCol(HighsInt numCol) {
 void HighsNodeQueue::checkGlobalBounds(HighsInt col, double lb, double ub,
                                        double feastol,
                                        HighsCDouble& treeweight) {
-  std::set<int64_t> delnodes;
+  auto& delnodes = delnodesScratch;
+  delnodes.clear();
 
   auto colLowerNodes = colLowerNodesPtr.get();
   auto colUpperNodes = colUpperNodesPtr.get();
+  delnodes.reserve(colLowerNodes[col].size() + colUpperNodes[col].size());
 
   auto prunestart =
       colLowerNodes[col].lower_bound(std::make_pair(ub + feastol, -1));
   for (auto it = prunestart; it != colLowerNodes[col].end(); ++it)
-    delnodes.insert(it->second);
+    delnodes.push_back(it->second);
 
   auto pruneend =
       colUpperNodes[col].upper_bound(std::make_pair(lb - feastol, kHighsIInf));
   for (auto it = colUpperNodes[col].begin(); it != pruneend; ++it)
-    delnodes.insert(it->second);
+    delnodes.push_back(it->second);
+
+  if (delnodes.empty()) return;
+
+  std::sort(delnodes.begin(), delnodes.end());
+  delnodes.erase(std::unique(delnodes.begin(), delnodes.end()), delnodes.end());
 
   for (int64_t delnode : delnodes) {
     if (nodes[delnode].estimate != kHighsInf)

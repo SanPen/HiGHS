@@ -74,19 +74,15 @@ class HighsImplications {
 
   void reset() {
     colsubstituted.clear();
-    colsubstituted.shrink_to_fit();
     implications.clear();
-    implications.shrink_to_fit();
 
     HighsInt numcol = mipsolver.numCol();
     implications.resize(2 * static_cast<size_t>(numcol));
     colsubstituted.resize(numcol);
     numImplications = 0;
     vubs.clear();
-    vubs.shrink_to_fit();
     vubs.resize(numcol);
     vlbs.clear();
-    vlbs.shrink_to_fit();
     vlbs.resize(numcol);
     numVarBounds = 0;
     maxVarBounds = calcMaxVarBounds(numcol);

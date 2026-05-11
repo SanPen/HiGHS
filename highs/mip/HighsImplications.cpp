@@ -501,18 +501,14 @@ void HighsImplications::rebuild(HighsInt ncols,
   oldvubs.swap(vubs);
 
   colsubstituted.clear();
-  colsubstituted.shrink_to_fit();
   implications.clear();
-  implications.shrink_to_fit();
 
   implications.resize(2 * ncols);
   colsubstituted.resize(ncols);
   substitutions.clear();
   vubs.clear();
-  vubs.shrink_to_fit();
   vubs.resize(ncols);
   vlbs.clear();
-  vlbs.shrink_to_fit();
   vlbs.resize(ncols);
   numImplications = 0;
   numVarBounds = 0;

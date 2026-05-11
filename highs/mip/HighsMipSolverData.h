@@ -108,7 +108,9 @@ struct HighsMipSolverData {
 
   double feastol;
   double epsilon;
+  double base_heuristic_effort;
   double heuristic_effort;
+  bool aggressive_root_heuristic_profile;
   int64_t dispfreq;
   std::vector<double> analyticCenter;
   std::vector<double> firstlpsol;
@@ -179,7 +181,9 @@ struct HighsMipSolverData {
         numCliqueEntriesAfterFirstPresolve(0),
         feastol(0.0),
         epsilon(0.0),
+        base_heuristic_effort(0.0),
         heuristic_effort(0.0),
+        aggressive_root_heuristic_profile(false),
         dispfreq(0),
         firstlpsolobj(-kHighsInf),
         rootlpsolobj(-kHighsInf),
@@ -248,6 +252,9 @@ struct HighsMipSolverData {
   double computeNewUpperLimit(double upper_bound, double mip_abs_gap,
                               double mip_rel_gap) const;
   bool moreHeuristicsAllowed() const;
+  void updateRootHeuristicProfile();
+  bool runZiRoundHeuristic() const;
+  bool runShiftingHeuristic() const;
   void removeFixedIndices();
   void init();
   void basisTransfer();
@@ -264,6 +271,10 @@ struct HighsMipSolverData {
   bool checkSolution(const std::vector<double>& solution) const;
   std::vector<std::tuple<HighsInt, HighsInt, double>> getInfeasibleRows(
       const std::vector<double>& solution) const;
+  void getInfeasibleRows(
+      const std::vector<double>& solution,
+      std::vector<std::tuple<HighsInt, HighsInt, double>>& infeasibleRows)
+      const;
   bool trySolution(const std::vector<double>& solution,
                    const int solution_source = kSolutionSourceNone);
   bool rootSeparationRound(HighsSeparation& sepa, HighsInt& ncuts,
